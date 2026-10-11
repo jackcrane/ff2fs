@@ -1,0 +1,19 @@
+{
+  "dependencies": [],
+  "content_type": "MISC",
+  "title": "FF2FS EFB Route Bridge",
+  "manufacturer": "FF2FS",
+  "creator": "FF2FS",
+  "package_version": "0.1.0",
+  "minimum_game_version": "0.0.0",
+  "package_order_hint": "NONE",
+  "release_notes": {
+    "neutral": {
+      "LastUpdate": "2026-10-11T00:00:00Z",
+      "OlderHistory": "",
+      "Items": {
+        "Item": ["Local ForeFlight route synchronization for the MSFS 2024 EFB, ATC, and compatible avionics."]
+      }
+    }
+  }
+}

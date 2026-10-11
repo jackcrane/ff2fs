@@ -1,0 +1,16 @@
+{
+  "name": "ff2fs",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ForeFlight-to-MSFS 2024 EFB route-sync bridge",
+  "scripts": {
+    "probe:oanp": "node src/oanp-probe.js",
+    "start:windows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\start-receiver.ps1"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "node-simconnect": "^4.2.1"
+  }
+}
