@@ -1,5 +1,6 @@
 param(
   [switch]$Elevated,
+  [switch]$ProcedureCapture,
   [string]$NodePath
 )
 
@@ -55,6 +56,12 @@ if (-not $NodePath) {
 }
 $env:FF2FS_EFB_BRIDGE = '1'
 $env:FF2FS_MSFS_LOAD = '0'
+if ($ProcedureCapture) {
+  $env:FF2FS_PROCEDURE_CAPTURE = '1'
+  Write-Host 'Procedure capture enabled; the next received plan will be retained in the FF2FS logs folder.'
+} else {
+  Remove-Item Env:FF2FS_PROCEDURE_CAPTURE -ErrorAction SilentlyContinue
+}
 Write-Host 'MSFS EFB route bridge enabled on localhost:64098.'
 Write-Host 'Legacy SimConnect FlightPlanLoad disabled; the MSFS 2024 EFB route bridge is authoritative.'
 & $NodePath .\src\oanp-probe.js

@@ -3,6 +3,8 @@
 const dgram = require('node:dgram');
 const net = require('node:net');
 const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
 const { execFile } = require('node:child_process');
 const { LOG_DIRECTORY, logPath, installConsoleFileLogging } = require('./logger');
 const runtimeStatus = require('./runtime-status');
@@ -20,6 +22,7 @@ const OANP_PORT = 8384;
 const FORE_FLIGHT_TRANSFER_PORT = 64099;
 const IN_SIM_BRIDGE_PORT = 64098;
 const enableInSimBridge = process.env.FF2FS_EFB_BRIDGE === '1';
+const enableProcedureCapture = process.env.FF2FS_PROCEDURE_CAPTURE === '1';
 const BRIDGE_TIMEOUT_MS = 15_000;
 const targets = new Map();
 let lastBridgeStatusAt = 0;
@@ -27,8 +30,8 @@ let lastPlanReceivedAt = 0;
 let bridgeUnavailableReported = false;
 // Bump the simulated endpoint identity whenever changing its wire contract.
 // ForeFlight caches an endpoint's host/port by identity across heartbeats.
-const SYSTEM_ID = 'FF2FS-SKYVIEW-002';
-const ENDPOINT_UUID = '4e4f414e-502d-4646-3246-533030303032';
+const SYSTEM_ID = 'FF2FS-CRANE-001';
+const ENDPOINT_UUID = '46463246-5343-5241-4e45-303030303031';
 
 console.log(`MSFS FlightPlanLoad mode: ${process.env.FF2FS_MSFS_LOAD === '0' ? 'disabled by environment; using the EFB route bridge' : 'ENABLED alongside the EFB route bridge'}.`);
 runtimeStatus.update('receiver', true, 'Receiver is starting');
@@ -201,6 +204,24 @@ function routeStringFromFlightPlan(payload) {
   return identifiers.join(' → ');
 }
 
+function captureProcedurePayload(payload, plan, routeString) {
+  if (!enableProcedureCapture) return;
+
+  // Keep the original protobuf intact. Procedure selections may be represented
+  // by fields that are not part of the waypoint list, so a decoded route alone
+  // is not sufficient for reverse engineering arrivals and approaches.
+  const capturePath = path.join(LOG_DIRECTORY, 'latest-procedure-capture.json');
+  const capture = {
+    capturedAt: new Date().toISOString(),
+    routeString: routeString || null,
+    decodedPlan: plan || null,
+    payloadBase64: payload.toString('base64'),
+    payloadHex: payload.toString('hex'),
+  };
+  fs.writeFileSync(capturePath, `${JSON.stringify(capture, null, 2)}\n`, 'utf8');
+  console.log(`Procedure capture saved: ${capturePath}`);
+}
+
 function saveFlightPlan(payload, remote) {
   // The leading fixed32 field is part of PB_Data_FlightPlan, not a transport
   // wrapper. Preserve the complete protobuf so the last waypoint is intact.
@@ -223,6 +244,7 @@ function saveFlightPlan(payload, remote) {
   console.log(`Route: ${routeString || '(waypoint identifiers unavailable)'}`);
   if (plan) console.log(`Flight plan received: ${plan.name || '(unnamed)'} — ${plan.waypoints.length} waypoint(s)`);
   else console.log(`Flight plan received (decoder note: ${parseError}).`);
+  captureProcedurePayload(payload, plan, routeString);
   lastPlanReceivedAt = Date.now();
   bridgeUnavailableReported = false;
   runtimeStatus.plan(routeString || '(route identifiers unavailable)', plan?.waypoints?.length);
@@ -249,12 +271,12 @@ function heartbeatPayload() {
     field(4, 0, varint(OANP_PORT)),      // endpoint TCP/UDP port (uint32)
     boolField(5, true),                  // this endpoint is an EFIS/panel
     messageField(6, capabilities),
-    stringField(7, 'Dynon Avionics, Inc.'),
-    stringField(8, 'SkyView'),
-    stringField(9, 'D1000/D700'),
-    stringField(10, 'FF2FS-002'),
+    stringField(7, 'Crane Digital Platforms'),
+    stringField(8, 'ff2fs.built-by-cdp.com'),
+    stringField(9, 'FF2FS'),
+    stringField(10, 'FF2FS'),
     stringField(11, '16.7.8'),
-    stringField(12, 'SkyView-FF2FS')
+    stringField(12, 'FF2FS')
   ]);
 }
 
@@ -295,7 +317,7 @@ discoveryUdp.bind(DISCOVERY_PORT, () => {
 });
 oanpUdp.bind(OANP_PORT, '0.0.0.0', () => {
   oanpUdp.setBroadcast(true);
-  console.log(`Advertising SkyView OANP heartbeat from ${localIPv4()}:${OANP_PORT}.`);
+  console.log(`Advertising FF2FS OANP heartbeat from ${localIPv4()}:${OANP_PORT}.`);
 });
 
 function createTcpServer(port) {
