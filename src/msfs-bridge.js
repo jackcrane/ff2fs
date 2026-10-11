@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { open, Protocol } = require('node-simconnect');
 
@@ -187,15 +188,8 @@ async function simConnect() {
 async function writeAndLoadFlightPlan(payload, routeString) {
   const waypoints = extractWaypoints(payload);
   if (waypoints.length < 2) throw new Error('Received route has fewer than two navigable waypoints');
-  const directory = path.join(process.cwd(), 'msfs-plans');
-  fs.mkdirSync(directory, { recursive: true });
-  const timestamp = new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-');
-  const planPath = path.join(directory, `${timestamp}-${waypoints[0].ident}-to-${waypoints.at(-1).ident}.PLN`);
-  fs.writeFileSync(planPath, flightPlanXml(waypoints, routeString || `${waypoints[0].ident} to ${waypoints.at(-1).ident}`));
-  console.log(`MSFS plan written: ${planPath} (${fs.statSync(planPath).size} bytes).`);
-
-  // Retain the decoded plan in process for diagnostics. The operational path
-  // is the native SimConnect FlightPlanLoad call below.
+  // Retain the decoded plan in process. The EFB bridge reads this directly;
+  // no workspace artifacts are created during ordinary route synchronization.
   latestPlan = {
     revision: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     receivedAt: new Date().toISOString(),
@@ -208,15 +202,22 @@ async function writeAndLoadFlightPlan(payload, routeString) {
       longitude,
     })),
   };
-  console.log(`MSFS decoded plan ready for native SimConnect load (${waypoints.length} waypoint(s)).`);
+  console.log(`MSFS decoded plan ready for EFB route synchronization (${waypoints.length} waypoint(s)).`);
 
   // Do not load automatically while validating route fidelity. A malformed
   // flight-plan file can destabilize MSFS avionics. Explicit opt-in keeps the
   // ForeFlight receiver safe while preserving the generated .PLN for review.
   if (process.env.FF2FS_MSFS_LOAD === '0') {
-    console.log('SimConnect FlightPlanLoad is disabled by FF2FS_MSFS_LOAD=0; the G1000 bridge remains available.');
-    return { planPath, waypoints, dispatched: false };
+    console.log('SimConnect FlightPlanLoad is disabled by FF2FS_MSFS_LOAD=0; awaiting the EFB route bridge.');
+    return { waypoints, dispatched: false };
   }
+
+  const directory = path.join(os.tmpdir(), 'FF2FS', 'plans');
+  fs.mkdirSync(directory, { recursive: true });
+  const timestamp = new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-');
+  const planPath = path.join(directory, `${timestamp}-${waypoints[0].ident}-to-${waypoints.at(-1).ident}.PLN`);
+  fs.writeFileSync(planPath, flightPlanXml(waypoints, routeString || `${waypoints[0].ident} to ${waypoints.at(-1).ident}`));
+  console.log(`Diagnostic SimConnect plan written: ${planPath} (${fs.statSync(planPath).size} bytes).`);
 
   console.log(`MSFS FlightPlanLoad preparing absolute path: ${path.resolve(planPath)}`);
   const handle = await simConnect();

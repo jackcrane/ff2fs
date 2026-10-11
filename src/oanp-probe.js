@@ -3,9 +3,12 @@
 const dgram = require('node:dgram');
 const net = require('node:net');
 const http = require('node:http');
-const fs = require('node:fs');
-const path = require('node:path');
+const { execFile } = require('node:child_process');
+const { LOG_DIRECTORY, logPath, installConsoleFileLogging } = require('./logger');
+const runtimeStatus = require('./runtime-status');
 const { writeAndLoadFlightPlan, getLatestPlan } = require('./msfs-bridge');
+
+installConsoleFileLogging();
 
 const DISCOVERY_PORT = 63093;
 // SkyView's own get_heartbeat() stores 0x20c0 here: TCP/UDP 8384.  Its
@@ -17,13 +20,18 @@ const OANP_PORT = 8384;
 const FORE_FLIGHT_TRANSFER_PORT = 64099;
 const IN_SIM_BRIDGE_PORT = 64098;
 const enableInSimBridge = process.env.FF2FS_EFB_BRIDGE === '1';
+const BRIDGE_TIMEOUT_MS = 15_000;
 const targets = new Map();
+let lastBridgeStatusAt = 0;
+let lastPlanReceivedAt = 0;
+let bridgeUnavailableReported = false;
 // Bump the simulated endpoint identity whenever changing its wire contract.
 // ForeFlight caches an endpoint's host/port by identity across heartbeats.
 const SYSTEM_ID = 'FF2FS-SKYVIEW-002';
 const ENDPOINT_UUID = '4e4f414e-502d-4646-3246-533030303032';
 
 console.log(`MSFS FlightPlanLoad mode: ${process.env.FF2FS_MSFS_LOAD === '0' ? 'disabled by environment; using the EFB route bridge' : 'ENABLED alongside the EFB route bridge'}.`);
+runtimeStatus.update('receiver', true, 'Receiver is starting');
 
 function localIPv4() {
   const interfaces = require('node:os').networkInterfaces();
@@ -197,11 +205,6 @@ function saveFlightPlan(payload, remote) {
   // The leading fixed32 field is part of PB_Data_FlightPlan, not a transport
   // wrapper. Preserve the complete protobuf so the last waypoint is intact.
   const planPayload = payload;
-  const receivedAt = new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-');
-  const folder = path.join(process.cwd(), 'received-plans');
-  fs.mkdirSync(folder, { recursive: true });
-  const base = path.join(folder, `${receivedAt}-${remote.address.replaceAll(':', '_')}`);
-  fs.writeFileSync(`${base}.pb`, planPayload);
   let plan;
   let parseError;
   let routeString;
@@ -217,17 +220,12 @@ function saveFlightPlan(payload, remote) {
   } catch (error) {
     parseError ||= error.message;
   }
-  fs.writeFileSync(`${base}.json`, `${JSON.stringify({
-    receivedAt: new Date().toISOString(),
-    source: remote,
-    routeString,
-    plan,
-    parseError,
-  }, null, 2)}\n`);
   console.log(`Route: ${routeString || '(waypoint identifiers unavailable)'}`);
   if (plan) console.log(`Flight plan received: ${plan.name || '(unnamed)'} — ${plan.waypoints.length} waypoint(s)`);
-  else console.log(`Flight plan received and saved as raw protobuf (decoder note: ${parseError}).`);
-  console.log(`Saved ${base}.json and ${base}.pb`);
+  else console.log(`Flight plan received (decoder note: ${parseError}).`);
+  lastPlanReceivedAt = Date.now();
+  bridgeUnavailableReported = false;
+  runtimeStatus.plan(routeString || '(route identifiers unavailable)', plan?.waypoints?.length);
   writeAndLoadFlightPlan(payload, routeString).catch((error) => {
     console.error(`MSFS route processing skipped: ${error.message}`);
   });
@@ -288,10 +286,12 @@ discoveryUdp.on('message', (message, remote) => {
     const key = `${remote.address}:${port}`;
     if (!targets.has(key)) console.log(`ForeFlight discovered at ${key}`);
     targets.set(key, { address: remote.address, port });
+    runtimeStatus.update('foreFlight', true, `ForeFlight found at ${remote.address}`);
   } catch { /* OANP and other binary traffic is ignored here. */ }
 });
 discoveryUdp.bind(DISCOVERY_PORT, () => {
   console.log(`OANP probe listening for ForeFlight discovery on UDP ${DISCOVERY_PORT}.`);
+  runtimeStatus.update('receiver', true, `Listening on Wi-Fi (${localIPv4()})`);
 });
 oanpUdp.bind(OANP_PORT, '0.0.0.0', () => {
   oanpUdp.setBroadcast(true);
@@ -409,7 +409,10 @@ const inSimBridgeServer = enableInSimBridge ? http.createServer((request, respon
     request.on('end', () => {
       try {
         const status = JSON.parse(body);
+        lastBridgeStatusAt = Date.now();
+        bridgeUnavailableReported = false;
         console.log(`[MSFS route bridge] ${status.level || 'info'}: ${status.message || 'status update'}`);
+        runtimeStatus.update('msfs', status.level !== 'error', status.message || 'MSFS bridge reported status');
       } catch {
         console.log('[MSFS route bridge] sent an unreadable status update.');
       }
@@ -417,12 +420,25 @@ const inSimBridgeServer = enableInSimBridge ? http.createServer((request, respon
     });
     return;
   }
+  if (request.method === 'POST' && request.url === '/v1/open-logs') {
+    // "start" is a cmd built-in and opens folders reliably, including paths
+    // with spaces, whereas Explorer may reject an AppContainer-style launch.
+    execFile('cmd.exe', ['/d', '/s', '/c', `start "" "${LOG_DIRECTORY}"`], (error) => {
+      if (error) console.error(`Could not open logs folder: ${error.message}`);
+    });
+    response.writeHead(204).end();
+    return;
+  }
   if (request.method !== 'GET') {
     response.writeHead(405).end();
     return;
   }
   if (request.url === '/health') {
-    response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true }));
+    response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true, logPath }));
+    return;
+  }
+  if (request.url === '/v1/status') {
+    response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ...runtimeStatus.snapshot(), logDirectory: LOG_DIRECTORY, logPath }));
     return;
   }
   if (request.url !== '/v1/flight-plan') {
@@ -450,6 +466,14 @@ setInterval(() => {
   oanpUdp.send(packet, OANP_PORT, '255.255.255.255');
   for (const target of targets.values()) oanpUdp.send(packet, target.port, target.address);
 }, 1000).unref();
+
+setInterval(() => {
+  if (!enableInSimBridge || bridgeUnavailableReported || !lastPlanReceivedAt) return;
+  if (lastBridgeStatusAt >= lastPlanReceivedAt || Date.now() - lastPlanReceivedAt <= BRIDGE_TIMEOUT_MS) return;
+  bridgeUnavailableReported = true;
+  console.error('MSFS EFB bridge did not respond after the received flight plan. Check that the FF2FS EFB Route Bridge Community package is installed and MSFS is running.');
+  runtimeStatus.update('msfs', false, 'EFB bridge is not connected');
+}, 5000).unref();
 
 process.on('SIGINT', () => {
   discoveryUdp.close();

@@ -14,18 +14,12 @@ $ruleSpecs = @(
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)
 $isAdministrator = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-
-if (-not $isAdministrator) {
-  if (-not $NodePath) {
-    $NodePath = (Get-Command node -ErrorAction Stop).Source
-  }
-  $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-Elevated', '-NodePath', "`"$NodePath`"")
-  Start-Process -FilePath powershell.exe -Verb RunAs -ArgumentList $arguments
-  exit 0
-}
-
-foreach ($spec in $ruleSpecs) {
-  if (-not (Get-NetFirewallRule -DisplayName $spec.Name -ErrorAction SilentlyContinue)) {
+# Firewall rules are installed once by an administrator.  Do not request UAC
+# on every normal receiver launch: discovery and the localhost status API both
+# work without elevation when the existing rules are present.
+if ($isAdministrator) {
+  foreach ($spec in $ruleSpecs) {
+    if (-not (Get-NetFirewallRule -DisplayName $spec.Name -ErrorAction SilentlyContinue)) {
     New-NetFirewallRule `
       -DisplayName $spec.Name `
       -Description 'FF2FS ForeFlight-compatible OANP panel receiver; permits local Wi-Fi subnet only.' `
@@ -35,7 +29,10 @@ foreach ($spec in $ruleSpecs) {
       -LocalPort $spec.Port `
       -RemoteAddress LocalSubnet `
       -Profile Public | Out-Null
+    }
   }
+} else {
+  Write-Host 'Using the existing FF2FS firewall rules (no elevation required).'
 }
 
 # A previous visible receiver may have been closed without its Node child
