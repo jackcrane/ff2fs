@@ -9,6 +9,7 @@ const { execFile } = require('node:child_process');
 const { LOG_DIRECTORY, logPath, installConsoleFileLogging } = require('./logger');
 const runtimeStatus = require('./runtime-status');
 const { writeAndLoadFlightPlan, getLatestPlan } = require('./msfs-bridge');
+const foreFlightGdl90 = require('./foreflight-gdl90');
 
 installConsoleFileLogging();
 
@@ -258,9 +259,12 @@ function heartbeatPayload() {
   // protobuf constants in /app/ampm.build.exe.
   const capabilities = Buffer.concat([
     boolField(1, true), // status
-    boolField(2, true), // GPS
-    boolField(3, true), // AHRS
-    boolField(4, true), // ADAHRS
+    // Live flight data belongs to FF2FS's separate GDL90 device. Advertising
+    // these on the OANP panel makes ForeFlight select the panel instead and
+    // suppress the independent GPS/AHRS/air-data source.
+    boolField(2, false), // GPS
+    boolField(3, false), // AHRS
+    boolField(4, false), // ADAHRS
     boolField(5, true), // flight-plan transmit
     boolField(6, true)  // flight-plan receive
   ]);
@@ -305,9 +309,11 @@ discoveryUdp.on('message', (message, remote) => {
     const beacon = JSON.parse(message.toString('utf8'));
     if (beacon?.App !== 'ForeFlight') return;
     const port = OANP_PORT;
+    const gdl90Port = Number(beacon.GDL90?.port);
+    if (!Number.isInteger(gdl90Port) || gdl90Port < 1 || gdl90Port > 65535) return;
     const key = `${remote.address}:${port}`;
     if (!targets.has(key)) console.log(`ForeFlight discovered at ${key}`);
-    targets.set(key, { address: remote.address, port });
+    targets.set(key, { address: remote.address, port, gdl90Port });
     runtimeStatus.update('foreFlight', true, `ForeFlight found at ${remote.address}`);
   } catch { /* OANP and other binary traffic is ignored here. */ }
 });
@@ -319,6 +325,12 @@ oanpUdp.bind(OANP_PORT, '0.0.0.0', () => {
   oanpUdp.setBroadcast(true);
   console.log(`Advertising FF2FS OANP heartbeat from ${localIPv4()}:${OANP_PORT}.`);
 });
+
+if (process.env.FF2FS_GDL90 !== '0') {
+  foreFlightGdl90.start(() => targets.values());
+} else {
+  console.log('FF2FS GDL90 telemetry disabled for reference capture.');
+}
 
 function createTcpServer(port) {
   const tcp = net.createServer((socket) => {
