@@ -88,7 +88,8 @@ function ownship(data) {
   payload[12] = ((altitude & 0x0f) << 4) | ((data.onGround ? 0 : 1) << 3) | 0x01;
   payload[13] = 0xbb; // NIC 11 / NACp 11
   const speed = clamp(Math.trunc(Math.max(0, data.groundSpeed)), 0, 0xffe);
-  const vertical = clamp(Math.trunc(data.verticalSpeedFps * 60 / 64), -512, 511) & 0x0fff;
+  // GDL90 carries a signed 12-bit value in 64 fpm increments.
+  const vertical = clamp(Math.trunc(data.verticalSpeedFps * 60 / 64), -2048, 2047) & 0x0fff;
   payload[14] = speed >>> 4;
   payload[15] = ((speed & 0x0f) << 4) | (vertical >>> 8);
   payload[16] = vertical & 0xff;
@@ -102,7 +103,10 @@ function geoAltitude(data) {
   const payload = Buffer.alloc(5);
   payload[0] = 0x0b;
   payload.writeInt16BE(clamp(Math.round(data.altitude / 5), -32768, 32767), 1);
-  payload.writeUInt16BE(0x7fff, 3);
+  // 0x7fff means "vertical accuracy unavailable".  ForeFlight accepts the
+  // message, but does not consistently surface that altitude.  MSFS gives us
+  // a precise simulated MSL altitude, so advertise a valid 10 m VFOM.
+  payload.writeUInt16BE(10, 3);
   return frame(payload);
 }
 
@@ -121,15 +125,20 @@ function deviceInfo() {
 }
 
 function ahrs(data) {
-  const int16 = (value) => clamp(Math.round(value), -32768, 32767);
-  const uint16 = (value) => clamp(Math.trunc(value), 0, 65534);
+  // ForeFlight rejects an entire AHRS frame if roll/pitch/heading are outside
+  // these documented ranges.  Keep the valid speed values in that frame from
+  // being discarded during an unusual MSFS attitude excursion.
+  const tenthDegree = (value, limit) => clamp(Math.round(value * 10), -limit, limit);
+  const uint16 = (value) => clamp(Math.round(value), 0, 65534);
   const heading = ((data.trueHeading % 360) + 360) % 360;
   const payload = Buffer.alloc(12);
   payload[0] = 0x65;
   payload[1] = 0x01;
-  payload.writeInt16BE(int16(data.bank * 10), 2);
-  payload.writeInt16BE(int16(data.pitch * 10), 4);
-  payload.writeUInt16BE(uint16(heading * 10), 6);
+  // MSFS and ForeFlight use opposite roll signs for this extension.
+  payload.writeInt16BE(tenthDegree(-data.bank, 1800), 2);
+  // MSFS pitch sign is opposite to ForeFlight's AHRS convention as well.
+  payload.writeInt16BE(tenthDegree(-data.pitch, 1800), 4);
+  payload.writeUInt16BE(uint16(clamp(heading * 10, 0, 3600)), 6);
   payload.writeUInt16BE(uint16(data.indicatedAirspeed), 8);
   payload.writeUInt16BE(uint16(data.trueAirspeed), 10);
   return frame(payload);
@@ -168,7 +177,14 @@ function sendDue(data, now) {
   }
   if (now - lastLog >= 5000 && Array.from(targetProvider()).length) {
     lastLog = now;
-    console.log(`FF2FS GDL90: ${data.latitude.toFixed(5)},${data.longitude.toFixed(5)}; ${data.trueHeading.toFixed(1)}°.`);
+    console.log(
+      `FF2FS GDL90: alt ${data.altitude.toFixed(0)} ft MSL / ${data.pressureAltitude.toFixed(0)} ft PA; ` +
+      `VS ${(data.verticalSpeedFps * 60).toFixed(0)} fpm; GS ${data.groundSpeed.toFixed(0)} kt; ` +
+      `IAS ${data.indicatedAirspeed.toFixed(0)} kt; TAS ${data.trueAirspeed.toFixed(0)} kt; ` +
+      `hdg ${data.trueHeading.toFixed(1)}°; bank ${data.bank.toFixed(1)}°. ` +
+      `GDL fields: geo VFOM 10 m; ownship PA ${Math.trunc((data.pressureAltitude + 1000) / 25) * 25 - 1000} ft; ` +
+      `ownship VS ${Math.trunc(data.verticalSpeedFps * 60 / 64) * 64} fpm.`
+    );
   }
 }
 
